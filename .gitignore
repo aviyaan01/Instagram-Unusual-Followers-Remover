@@ -1,5 +1,35 @@
+# Python bytecode & cache
 __pycache__/
-*.pyc
-ig_session/
-.env
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
 .venv/
+venv/
+ENV/
+env/
+
+# Instagram session & cookies (CRITICAL: NEVER COMMIT THIS)
+ig_session/
+*.session
+
+# Local Reports & Scanned User Data (Personal / Sensitive)
+*.csv
+followers_report.csv
+removal_candidates.csv
+scanned_users.txt
+*.log
+
+# Environment files & Secrets
+.env
+.env.local
+.env.*.local
+
+# Operating System & IDE files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

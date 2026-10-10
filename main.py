@@ -25,23 +25,44 @@ if sys.platform == "win32":
         pass
 
 # ==============================================================================
-# CONFIGURATION CONSTANTS
+# ENVIRONMENT & CONFIGURATION LOADER
 # ==============================================================================
+def load_dotenv(filepath: str = ".env") -> None:
+    """Load key-value settings from .env file into os.environ if file exists."""
+    if not os.path.exists(filepath):
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
+# Automatically load .env if present
+load_dotenv()
+
 # Optional: Set your username here directly (e.g. "my_username"), or leave empty "" to auto-detect
-TARGET_USERNAME = ""
+TARGET_USERNAME = os.getenv("TARGET_USERNAME", "")
 
 # Browser Configuration
-USE_REAL_CHROME = True  # True = use your installed Google Chrome; False = use Playwright's Chromium
-HEADLESS = False        # False = show browser window (can be minimized to taskbar). True = run completely hidden in background (once logged in)
+USE_REAL_CHROME = os.getenv("USE_REAL_CHROME", "True").lower() in ("true", "1", "yes")
+HEADLESS = os.getenv("HEADLESS", "False").lower() in ("true", "1", "yes")
 
-DRY_RUN = False              # False = LIVE MODE (Real removals enabled!)
-LIVE_REMOVE_IN_LOOP = True   # True = Remove candidates LIVE on the spot inside the loop as soon as detected!
-AUTO_CONFIRM_REMOVAL = True  # True = automatically remove candidates without waiting for manual 'y' prompt
-MAX_REMOVALS_PER_RUN = 150   # Maximum accounts to remove in a single run
+DRY_RUN = os.getenv("DRY_RUN", "False").lower() in ("true", "1", "yes")
+LIVE_REMOVE_IN_LOOP = os.getenv("LIVE_REMOVE_IN_LOOP", "True").lower() in ("true", "1", "yes")
+AUTO_CONFIRM_REMOVAL = os.getenv("AUTO_CONFIRM_REMOVAL", "True").lower() in ("true", "1", "yes")
+MAX_REMOVALS_PER_RUN = int(os.getenv("MAX_REMOVALS_PER_RUN", "150"))
 
 # Limit how many followers to scan from the top of the list (e.g. 25, 50, 100, 150)
-# Set to None if you want to scroll all the way down to the bottom
-MAX_FOLLOWERS_TO_SCAN = 150  # Scans top 150 followers from the top and removes candidates live!
+_max_scan_env = os.getenv("MAX_FOLLOWERS_TO_SCAN", "150")
+MAX_FOLLOWERS_TO_SCAN = int(_max_scan_env) if _max_scan_env and _max_scan_env.lower() != "none" else None
 
 # CSV Export Configuration
 EXPORT_CSV = True  # Automatically save scan results to CSV files
@@ -53,26 +74,23 @@ CSV_CANDIDATES = "removal_candidates.csv"     # List of removal candidates
 # ------------------------------------------------------------------------------
 # Rule 1: Follower / Following Difference
 CHECK_DIFF = True
-MIN_DIFF = 300  # Removal rule: (following_count - followers_count) >= MIN_DIFF
+MIN_DIFF = int(os.getenv("MIN_DIFF", "300"))
 
 # Rule 2: Inactive Account Detection (no posts for 2+ months, or 0 posts)
-CHECK_INACTIVE = True               # True = check if user is inactive (no recent posts)
-INACTIVE_DAYS_THRESHOLD = 60        # Days without posting to consider inactive (60 days = 2 months)
-TREAT_ZERO_POSTS_AS_INACTIVE = True # Treat accounts with 0 posts as inactive
+CHECK_INACTIVE = True
+INACTIVE_DAYS_THRESHOLD = int(os.getenv("INACTIVE_DAYS_THRESHOLD", "60"))
+TREAT_ZERO_POSTS_AS_INACTIVE = True
 
 # Rule 3: Post Count Protection (do not remove users with more than 10 posts)
-KEEP_USERS_WITH_POSTS_OVER = 10     # If user has > 10 posts, NEVER remove them (keep them safe)
+_keep_posts_env = os.getenv("KEEP_USERS_WITH_POSTS_OVER", "10")
+KEEP_USERS_WITH_POSTS_OVER = int(_keep_posts_env) if _keep_posts_env and _keep_posts_env.lower() != "none" else None
 
 # Rule 4: Skip Previously Scanned Users (never scan the same user twice)
-SKIP_PREVIOUSLY_SCANNED = True           # True = ignore users already scanned in previous runs
-SCANNED_USERS_FILE = "scanned_users.txt" # Persistent history file tracking all scanned usernames
+SKIP_PREVIOUSLY_SCANNED = os.getenv("SKIP_PREVIOUSLY_SCANNED", "True").lower() in ("true", "1", "yes")
+SCANNED_USERS_FILE = "scanned_users.txt"
 
 # Removal Mode Options:
-# "DIFF_OR_INACTIVE"  : Remove if (following - followers) >= 300 OR inactive for 60+ days
-# "INACTIVE_ONLY"     : Remove ONLY if inactive (no posts for 60+ days or 0 posts)
-# "DIFF_ONLY"         : Remove ONLY if (following - followers) >= 300
-# "DIFF_AND_INACTIVE" : Remove ONLY if BOTH difference >= 300 AND inactive
-REMOVAL_MODE = "DIFF_OR_INACTIVE"
+REMOVAL_MODE = os.getenv("REMOVAL_MODE", "DIFF_OR_INACTIVE")
 
 # Delay ranges (in seconds) for rate-limiting and human-like behavior
 PROFILE_VISIT_DELAY_MIN = 5.0
