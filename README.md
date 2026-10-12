@@ -1,6 +1,8 @@
 # Instagram Follower Cleaner
 
-An automated, intelligent tool built with **Python** and **Playwright (Sync API)** to clean your Instagram followers list based on ratio imbalance, inactivity, and post count protection.
+An automated, intelligent follower cleaning suite available in two modes:
+1. **🌐 Chrome Extension (Manifest V3)**: Zero setup, runs directly in your existing Google Chrome browser without Python or terminal commands. (See [extension/README.md](file:///c:/Users/ASUS/Desktop/IG/extension/README.md))
+2. **🐍 Python & Playwright Script**: Powerful automated background script with real Chrome browser support.
 
 ---
 
