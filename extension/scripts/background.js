@@ -30,6 +30,20 @@ function updateBadge() {
   }
 }
 
+// Helper to inject content script if not already present in the tab
+async function ensureContentScriptInjected(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['scripts/content.js']
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 // Listen for messages from popup or content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'GET_STATE') {
@@ -47,34 +61,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'RELAY_TO_CONTENT') {
-    // Send command to active Instagram tab
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const activeTab = tabs[0];
+    (async () => {
+      // 1. Check active tab in current window
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      let targetTab = null;
+
       if (activeTab && activeTab.url && activeTab.url.includes('instagram.com')) {
-        chrome.tabs.sendMessage(activeTab.id, message.payload, (response) => {
-          if (chrome.runtime.lastError) {
-            sendResponse({ success: false, error: chrome.runtime.lastError.message });
-          } else {
-            sendResponse(response || { success: true });
-          }
-        });
+        targetTab = activeTab;
       } else {
-        // Query any tab with instagram.com
-        chrome.tabs.query({ url: '*://*.instagram.com/*' }, (igTabs) => {
-          if (igTabs.length > 0) {
-            chrome.tabs.sendMessage(igTabs[0].id, message.payload, (response) => {
-              if (chrome.runtime.lastError) {
-                sendResponse({ success: false, error: chrome.runtime.lastError.message });
+        // 2. Check any open Instagram tab across all windows
+        const igTabs = await chrome.tabs.query({ url: '*://*.instagram.com/*' });
+        if (igTabs && igTabs.length > 0) {
+          targetTab = igTabs[0];
+          try {
+            await chrome.tabs.update(targetTab.id, { active: true });
+          } catch (e) {}
+        }
+      }
+
+      if (!targetTab) {
+        sendResponse({
+          success: false,
+          error: 'Instagram is not open! Please open https://www.instagram.com/ in a Chrome tab, log in, and try again.'
+        });
+        return;
+      }
+
+      // 3. Send message, or auto-inject content script if receiving end does not exist
+      chrome.tabs.sendMessage(targetTab.id, message.payload, async (response) => {
+        if (chrome.runtime.lastError || !response) {
+          // Content script was not loaded yet (e.g. tab was open before extension was installed/reloaded)
+          const injected = await ensureContentScriptInjected(targetTab.id);
+          if (injected) {
+            chrome.tabs.sendMessage(targetTab.id, message.payload, (retryResponse) => {
+              if (chrome.runtime.lastError || !retryResponse) {
+                sendResponse({
+                  success: false,
+                  error: 'Please reload your Instagram tab (F5) and click Start Cleaner again.'
+                });
               } else {
-                sendResponse(response || { success: true });
+                sendResponse(retryResponse);
               }
             });
           } else {
-            sendResponse({ success: false, error: 'No Instagram tab found.' });
+            sendResponse({
+              success: false,
+              error: 'Please reload your Instagram tab (F5) and click Start Cleaner again.'
+            });
           }
-        });
-      }
-    });
+        } else {
+          sendResponse(response);
+        }
+      });
+    })();
     return true; // Keep channel open for async response
   }
 });

@@ -271,12 +271,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const res = await sendToContent('START');
     if (!res.success) {
       renderState({ isRunning: false, isPaused: false, statusText: 'Failed to start' });
+      const errorMsg = res.error || 'Please open https://www.instagram.com/ in an active Chrome tab first.';
       appendLog({
         timestamp: new Date().toLocaleTimeString(),
         type: 'error',
-        message: `Error: Please open https://www.instagram.com/ in an active Chrome tab first.`
+        message: errorMsg
       });
-      alert('Please open https://www.instagram.com/ (your profile) in your browser tab before starting the cleaner.');
+      alert(errorMsg);
     } else {
       appendLog({
         timestamp: new Date().toLocaleTimeString(),
