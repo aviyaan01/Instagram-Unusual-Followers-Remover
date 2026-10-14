@@ -168,8 +168,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function loadSettings() {
     try {
-      const data = await chrome.storage.local.get(['config']);
-      const cfg = { ...DEFAULT_CONFIG, ...(data.config || {}) };
+      const data = await chrome.storage.local.get(['config', 'settings']);
+      const cfg = { ...DEFAULT_CONFIG, ...(data.config || data.settings || {}) };
 
       cfgMinDiff.value = cfg.minDiff ?? 300;
       cfgInactiveDays.value = cfg.inactiveDaysThreshold ?? 60;
@@ -187,8 +187,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const keepPostsVal = parseInt(cfgKeepPosts.value, 10) >= 0 ? parseInt(cfgKeepPosts.value, 10) : 10;
     const maxScanVal = parseInt(cfgMaxScan.value, 10) || 150;
 
-    const data = await chrome.storage.local.get(['config']);
-    const currentCfg = data.config || DEFAULT_CONFIG;
+    const data = await chrome.storage.local.get(['config', 'settings']);
+    const currentCfg = data.config || data.settings || DEFAULT_CONFIG;
 
     const updatedConfig = {
       ...currentCfg,
@@ -202,7 +202,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       dryRun: cfgDryRun.checked
     };
 
-    await chrome.storage.local.set({ config: updatedConfig });
+    await chrome.storage.local.set({ config: updatedConfig, settings: updatedConfig });
 
     btnSaveSettings.textContent = 'Settings Saved ✓';
     btnSaveSettings.style.borderColor = '#10B981';

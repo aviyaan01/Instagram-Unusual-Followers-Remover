@@ -49,16 +49,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'RELAY_TO_CONTENT') {
     // Send command to active Instagram tab
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0] && tabs[0].url && tabs[0].url.includes('instagram.com')) {
-        chrome.tabs.sendMessage(tabs[0].id, message.payload, (response) => {
-          sendResponse(response);
+      const activeTab = tabs[0];
+      if (activeTab && activeTab.url && activeTab.url.includes('instagram.com')) {
+        chrome.tabs.sendMessage(activeTab.id, message.payload, (response) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          } else {
+            sendResponse(response || { success: true });
+          }
         });
       } else {
         // Query any tab with instagram.com
         chrome.tabs.query({ url: '*://*.instagram.com/*' }, (igTabs) => {
           if (igTabs.length > 0) {
             chrome.tabs.sendMessage(igTabs[0].id, message.payload, (response) => {
-              sendResponse(response);
+              if (chrome.runtime.lastError) {
+                sendResponse({ success: false, error: chrome.runtime.lastError.message });
+              } else {
+                sendResponse(response || { success: true });
+              }
             });
           } else {
             sendResponse({ success: false, error: 'No Instagram tab found.' });

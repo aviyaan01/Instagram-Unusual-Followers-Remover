@@ -863,6 +863,8 @@ def main() -> None:
 
     context: Optional[BrowserContext] = None
     playwright_instance = None
+    candidates: List[Dict[str, Any]] = []
+    all_scanned_records: List[Dict[str, Any]] = []
 
     try:
         playwright_instance = sync_playwright().start()
@@ -1049,6 +1051,11 @@ def main() -> None:
                         delay = random.uniform(PROFILE_VISIT_DELAY_MIN, PROFILE_VISIT_DELAY_MAX)
                         time.sleep(delay)
 
+            # Periodic checkpoint export every 5 profiles or whenever a follower is removed live
+            if EXPORT_CSV and (idx % 5 == 0 or (record.get("status") == "removed")):
+                export_records_to_csv(CSV_ALL_REPORT, all_scanned_records)
+                export_records_to_csv(CSV_CANDIDATES, candidates)
+
         # Export CSV reports
         if EXPORT_CSV:
             print("\n" + "-" * 65)
@@ -1160,6 +1167,12 @@ def main() -> None:
             print(f"\n[UNEXPECTED ERROR] {e}")
 
     finally:
+        if EXPORT_CSV and all_scanned_records:
+            try:
+                export_records_to_csv(CSV_ALL_REPORT, all_scanned_records)
+                export_records_to_csv(CSV_CANDIDATES, candidates)
+            except Exception:
+                pass
         print("[INFO] Closing browser session cleanly...")
         if context:
             try:

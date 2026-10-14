@@ -35,9 +35,23 @@ const SYSTEM_PATHS = new Set([
   'popular', 'locations', 'emailsignup', 'login'
 ]);
 
-// Helper: sleep utility
+// Helper: sleep utilities
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min, max) => sleep(Math.floor(Math.random() * (max - min + 1)) + min);
+
+// Helper: Check rate limiting or action blocks
+function checkRateLimit() {
+  const text = (document.body?.innerText || '').toLowerCase();
+  const patterns = [
+    'try again later',
+    'action blocked',
+    'we restrict certain activity',
+    'we limit how often',
+    'temporarily blocked',
+    'please wait a few minutes'
+  ];
+  return patterns.some((p) => text.includes(p));
+}
 
 // Log message to storage and broadcast to popup
 async function logMessage(type, message, details = null) {
@@ -50,8 +64,8 @@ async function logMessage(type, message, details = null) {
 
   try {
     chrome.runtime.sendMessage({ action: 'LOG_ENTRY', entry: logEntry }).catch(() => {});
-    
-    // Also save recent logs in storage (keep last 150 entries)
+
+    // Save recent logs in storage (keep last 200 entries)
     const data = await chrome.storage.local.get(['recentLogs']);
     const logs = data.recentLogs || [];
     logs.push(logEntry);
@@ -72,9 +86,9 @@ async function broadcastState(updates = {}) {
 
 // Helper: Parse follower/following/posts counts
 function parseCount(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  raw = raw.trim();
-  const match = raw.match(/([\d,]+(?:\.\d+)?)\s*([kmbKMB])?/i);
+  if (raw === null || raw === undefined) return null;
+  const str = String(raw).trim();
+  const match = str.match(/([\d,]+(?:\.\d+)?)\s*([kmbKMB])?/i);
   if (!match) return null;
 
   let numStr = match[1].replace(/,/g, '');
@@ -96,7 +110,7 @@ function getMyUsername() {
   for (const link of profileLinks) {
     const text = link.innerText.trim().toLowerCase();
     const href = link.getAttribute('href') || '';
-    if (text === 'profile' || link.querySelector('svg[aria-label="Profile"]')) {
+    if (text === 'profile' || link.querySelector('svg[aria-label="Profile"]') || link.querySelector('img[data-testid="user-avatar"]')) {
       const parts = href.replace(/^\/|\/$/g, '').split('/');
       if (parts[0] && !SYSTEM_PATHS.has(parts[0])) {
         return parts[0];
@@ -113,11 +127,95 @@ function getMyUsername() {
   return null;
 }
 
+// Helper: Close Instagram dialogs cleanly
+function closeInstagramDialog() {
+  const dialogs = document.querySelectorAll('div[role="dialog"]');
+  for (const d of dialogs) {
+    const closeBtn = d.querySelector('svg[aria-label="Close"], button:has(svg[aria-label="Close"]), div[role="button"]:has(svg[aria-label="Close"])');
+    if (closeBtn) {
+      const clickable = closeBtn.closest('button, div[role="button"]') || closeBtn;
+      try { clickable.click(); } catch (e) {}
+    }
+  }
+  const escEvent = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true });
+  document.dispatchEvent(escEvent);
+  window.dispatchEvent(escEvent);
+}
+
 // Helper: Fetch and parse user profile data
 async function fetchUserProfileData(username) {
+  // Strategy 1: Call Instagram's internal web_profile_info endpoint (returns exact JSON counts & post dates)
+  try {
+    const apiRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
+      method: 'GET',
+      headers: {
+        'x-ig-app-id': '936619743392459',
+        'Accept': 'application/json'
+      },
+      credentials: 'include'
+    });
+
+    if (apiRes.ok) {
+      const json = await apiRes.json();
+      const user = json?.data?.user;
+      if (user) {
+        const followers = user.edge_followed_by?.count ?? null;
+        const following = user.edge_follow?.count ?? null;
+        const posts = user.edge_owner_to_timeline_media?.count ?? null;
+        const isPrivate = !!user.is_private;
+
+        let isInactive = false;
+        let inactiveReason = '';
+        let lastPostDays = null;
+
+        if (config.checkInactive) {
+          if (posts === 0) {
+            isInactive = true;
+            inactiveReason = '0 posts';
+          } else if (isPrivate) {
+            inactiveReason = 'private account';
+          } else {
+            const edges = user.edge_owner_to_timeline_media?.edges || [];
+            if (edges.length > 0 && edges[0]?.node?.taken_at_timestamp) {
+              const postTimestamp = edges[0].node.taken_at_timestamp * 1000;
+              const postDate = new Date(postTimestamp);
+              const now = new Date();
+              lastPostDays = Math.floor((now - postDate) / (1000 * 60 * 60 * 24));
+              if (lastPostDays >= config.inactiveDaysThreshold) {
+                isInactive = true;
+                inactiveReason = `inactive (${lastPostDays}d ago)`;
+              } else {
+                isInactive = false;
+                inactiveReason = `active (${lastPostDays}d ago)`;
+              }
+            }
+          }
+        }
+
+        if (followers !== null && following !== null) {
+          return {
+            followers,
+            following,
+            posts,
+            isPrivate,
+            isInactive,
+            inactiveReason,
+            lastPostDays
+          };
+        }
+      }
+    }
+  } catch (apiErr) {
+    // Continue to HTML fallback
+  }
+
+  // Strategy 2: HTML Scraping (Fallback if API endpoint is unavailable)
   try {
     const response = await fetch(`https://www.instagram.com/${username}/`, {
       method: 'GET',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
       credentials: 'include'
     });
 
@@ -169,7 +267,6 @@ async function fetchUserProfileData(username) {
       } else if (isPrivate) {
         inactiveReason = 'private account';
       } else {
-        // Look for timestamp of first post in HTML
         const timeMatch = htmlText.match(/datetime="([^"]+)"/i) || htmlText.match(/"taken_at_timestamp":\s*(\d+)/i);
         if (timeMatch) {
           let postDate = null;
@@ -210,15 +307,9 @@ async function fetchUserProfileData(username) {
 
 // Dismiss modals/banners
 function dismissPopups() {
-  const dismissSelectors = [
-    'button:has-text("Not now")',
-    'button:has-text("Not Now")',
-    'button:has-text("Cancel")',
-    'div[role="button"]:has-text("Not now")'
-  ];
   for (const btn of document.querySelectorAll('button, div[role="button"]')) {
-    const txt = btn.innerText.trim();
-    if (txt === 'Not now' || txt === 'Not Now' || txt === 'Cancel') {
+    const txt = btn.innerText?.trim();
+    if (txt === 'Not now' || txt === 'Not Now' || txt === 'Cancel' || txt === 'Allow all cookies') {
       try { btn.click(); } catch (e) {}
     }
   }
@@ -226,10 +317,27 @@ function dismissPopups() {
 
 // Open Followers modal on current profile
 async function openFollowersDialog(myUsername) {
+  // If dialog is ALREADY open and visible on screen, return it directly
+  const existingDialog = document.querySelector('div[role="dialog"]');
+  if (existingDialog && existingDialog.offsetParent !== null) {
+    return existingDialog;
+  }
+
   // Ensure we are on user profile page
-  if (!window.location.pathname.includes(`/${myUsername}`)) {
-    window.location.href = `https://www.instagram.com/${myUsername}/`;
-    await sleep(3000);
+  const currentPath = window.location.pathname.replace(/^\/|\/$/g, '').toLowerCase();
+  const targetLower = myUsername.toLowerCase();
+  if (currentPath !== targetLower && !currentPath.startsWith(`${targetLower}/`)) {
+    // Try SPA navigation via sidebar profile link first
+    const profileLink = document.querySelector(`a[href="/${myUsername}/"], a[href="/${myUsername}"]`);
+    if (profileLink) {
+      profileLink.click();
+      await sleep(2500);
+    } else {
+      // Set autoResume flag so script continues after full page navigation
+      await chrome.storage.local.set({ autoResume: true });
+      window.location.href = `https://www.instagram.com/${myUsername}/`;
+      return null;
+    }
   }
 
   dismissPopups();
@@ -259,6 +367,7 @@ async function openFollowersDialog(myUsername) {
 // Collect unscanned followers from Followers dialog
 async function collectFollowers(myUsername, scannedSet) {
   const dialog = await openFollowersDialog(myUsername);
+  if (!dialog) return [];
 
   const unscannedFollowers = new Set();
   const allSeenUsernames = new Set();
@@ -268,9 +377,14 @@ async function collectFollowers(myUsername, scannedSet) {
   logMessage('info', 'Scrolling Followers dialog to collect unscanned accounts...');
 
   while (!shouldStop) {
-    if (isPaused) {
+    while (isPaused && !shouldStop) {
       await sleep(1000);
-      continue;
+    }
+    if (shouldStop) break;
+
+    if (checkRateLimit()) {
+      logMessage('warning', 'Action limit or rate block detected. Halting collection.');
+      break;
     }
 
     const prevSeenTotal = allSeenUsernames.size;
@@ -334,9 +448,8 @@ async function collectFollowers(myUsername, scannedSet) {
     }
   }
 
-  // Close dialog
-  const escEvent = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true });
-  document.dispatchEvent(escEvent);
+  // Close dialog cleanly
+  closeInstagramDialog();
   await sleep(1000);
 
   let result = Array.from(unscannedFollowers);
@@ -351,6 +464,7 @@ async function collectFollowers(myUsername, scannedSet) {
 async function removeFollowerLive(myUsername, targetUsername) {
   try {
     const dialog = await openFollowersDialog(myUsername);
+    if (!dialog) return false;
 
     // Find search input
     const searchInput = dialog.querySelector('input[placeholder*="Search" i], input[type="text"]');
@@ -373,14 +487,50 @@ async function removeFollowerLive(myUsername, targetUsername) {
 
     await sleep(2500);
 
-    // Locate Remove button (Instagram uses div[role="button"] or button)
+    // Safe targeting: locate the SPECIFIC row matching targetUsername
+    const lowerTarget = targetUsername.toLowerCase();
     let removeBtn = null;
-    const allButtons = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-    removeBtn = allButtons.find((el) => el.innerText.trim() === 'Remove');
+
+    // 1. Try finding row with link matching targetUsername
+    const userLinks = Array.from(dialog.querySelectorAll(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`));
+    for (const link of userLinks) {
+      const hrefUser = (link.getAttribute('href') || '').replace(/^\/|\/$/g, '').split('/')[0].toLowerCase();
+      if (hrefUser === lowerTarget) {
+        let parent = link.parentElement;
+        for (let i = 0; i < 8 && parent && parent !== dialog; i++) {
+          const btn = Array.from(parent.querySelectorAll('div[role="button"], button')).find(
+            (b) => b.innerText && b.innerText.trim() === 'Remove'
+          );
+          if (btn) {
+            removeBtn = btn;
+            break;
+          }
+          parent = parent.parentElement;
+        }
+        if (removeBtn) break;
+      }
+    }
+
+    // 2. Fallback: row container containing the exact username text
+    if (!removeBtn) {
+      const allDivs = Array.from(dialog.querySelectorAll('div[role="listitem"], ul > li, div > div'));
+      for (const el of allDivs) {
+        const text = el.innerText || '';
+        if (text.toLowerCase().includes(lowerTarget)) {
+          const btn = Array.from(el.querySelectorAll('div[role="button"], button')).find(
+            (b) => b.innerText && b.innerText.trim() === 'Remove'
+          );
+          if (btn) {
+            removeBtn = btn;
+            break;
+          }
+        }
+      }
+    }
 
     if (!removeBtn) {
       logMessage('warning', `Remove button not found for @${targetUsername}.`);
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      closeInstagramDialog();
       return false;
     }
 
@@ -392,7 +542,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
     const confirmDialog = dialogs[dialogs.length - 1];
 
     const confirmBtns = Array.from(confirmDialog.querySelectorAll('button, div[role="button"]'));
-    const confirmBtn = confirmBtns.find((el) => el.innerText.trim() === 'Remove');
+    const confirmBtn = confirmBtns.find((el) => el.innerText && el.innerText.trim() === 'Remove');
 
     if (confirmBtn) {
       confirmBtn.click();
@@ -400,16 +550,18 @@ async function removeFollowerLive(myUsername, targetUsername) {
       logMessage('remove', `Removed @${targetUsername} live from followers.`);
     } else {
       logMessage('warning', `Confirmation modal button not found for @${targetUsername}.`);
+      closeInstagramDialog();
       return false;
     }
 
     // Close any dialogs
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    closeInstagramDialog();
     await sleep(500);
 
     return true;
   } catch (err) {
     logMessage('error', `Error removing @${targetUsername}: ${err.message}`);
+    closeInstagramDialog();
     return false;
   }
 }
@@ -425,9 +577,10 @@ async function startCleaningProcess() {
   logMessage('info', 'Starting Follower Cleaner process...');
 
   try {
-    // 1. Load config and history
-    const storageData = await chrome.storage.local.get(['settings', 'scannedUsers', 'allScannedRecords', 'removalCandidates']);
-    if (storageData.settings) config = { ...config, ...storageData.settings };
+    // 1. Load config and history (supports both 'config' and legacy 'settings' keys)
+    const storageData = await chrome.storage.local.get(['config', 'settings', 'scannedUsers', 'allScannedRecords', 'removalCandidates']);
+    const savedConfig = storageData.config || storageData.settings;
+    if (savedConfig) config = { ...config, ...savedConfig };
 
     const scannedSet = new Set(storageData.scannedUsers || []);
     const allRecords = storageData.allScannedRecords || [];
@@ -449,8 +602,9 @@ async function startCleaningProcess() {
     // 3. Collect followers
     await broadcastState({ statusText: 'Collecting followers list...' });
     const followers = await collectFollowers(myUsername, scannedSet);
-    const totalToScan = followers.length;
+    if (!followers) return; // redirected or stopped
 
+    const totalToScan = followers.length;
     logMessage('info', `Collected ${totalToScan} new unscanned follower(s) to inspect.`);
 
     if (totalToScan === 0) {
@@ -471,9 +625,17 @@ async function startCleaningProcess() {
         break;
       }
 
-      while (isPaused) {
+      while (isPaused && !shouldStop) {
         await broadcastState({ isPaused: true, statusText: 'Paused' });
         await sleep(1000);
+      }
+      if (shouldStop) break;
+
+      if (checkRateLimit()) {
+        logMessage('warning', 'Instagram action limit detected. Pausing process.');
+        isPaused = true;
+        await broadcastState({ isPaused: true, statusText: 'Action limit detected' });
+        break;
       }
 
       const username = followers[idx];
@@ -484,7 +646,7 @@ async function startCleaningProcess() {
 
       // Save user to history set immediately
       if (config.skipPreviouslyScanned) {
-        scannedSet.add(username.lower ? username.lower() : username.toLowerCase());
+        scannedSet.add(username.toLowerCase());
         await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
       }
 
@@ -498,6 +660,7 @@ async function startCleaningProcess() {
           diff: '',
           posts: '',
           is_inactive: '',
+          last_post_days: '',
           reason: 'could not read counts'
         });
         continue;
@@ -621,3 +784,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   return true;
 });
+
+// Auto-resume if redirected from another page to user profile
+(async () => {
+  try {
+    const data = await chrome.storage.local.get(['autoResume']);
+    if (data.autoResume) {
+      await chrome.storage.local.set({ autoResume: false });
+      setTimeout(() => {
+        if (!isRunning) startCleaningProcess();
+      }, 2500);
+    }
+  } catch (e) {}
+})();
