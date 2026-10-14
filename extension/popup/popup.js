@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const logTerminal = document.getElementById('logTerminal');
   const btnClearLogs = document.getElementById('btnClearLogs');
 
+  const cfgMyUsername = document.getElementById('cfgMyUsername');
   const cfgMinDiff = document.getElementById('cfgMinDiff');
   const cfgInactiveDays = document.getElementById('cfgInactiveDays');
   const cfgKeepPosts = document.getElementById('cfgKeepPosts');
@@ -171,6 +172,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const data = await chrome.storage.local.get(['config', 'settings']);
       const cfg = { ...DEFAULT_CONFIG, ...(data.config || data.settings || {}) };
 
+      const userRes = await chrome.storage.local.get(['savedUsername', 'config', 'settings']);
+      if (cfgMyUsername) {
+        cfgMyUsername.value = userRes.savedUsername || userRes.config?.myUsername || userRes.settings?.myUsername || '';
+      }
+
       cfgMinDiff.value = cfg.minDiff ?? 300;
       cfgInactiveDays.value = cfg.inactiveDaysThreshold ?? 60;
       cfgKeepPosts.value = cfg.keepUsersWithPostsOver ?? 10;
@@ -190,8 +196,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     const data = await chrome.storage.local.get(['config', 'settings']);
     const currentCfg = data.config || data.settings || DEFAULT_CONFIG;
 
+    const usernameVal = (cfgMyUsername?.value || '').trim().replace(/^@/, '');
+    if (usernameVal) {
+      await chrome.storage.local.set({ savedUsername: usernameVal });
+    }
+
     const updatedConfig = {
       ...currentCfg,
+      myUsername: usernameVal || currentCfg.myUsername || '',
       minDiff: minDiffVal,
       inactiveDaysThreshold: inactiveDaysVal,
       keepUsersWithPostsOver: keepPostsVal,

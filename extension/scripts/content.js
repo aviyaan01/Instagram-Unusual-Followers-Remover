@@ -104,25 +104,71 @@ function parseCount(raw) {
 }
 
 // Helper: Detect active logged-in username
-function getMyUsername() {
-  // Strategy 1: Check navigation profile link
-  const profileLinks = document.querySelectorAll('a[role="link"], a[href^="/"]');
-  for (const link of profileLinks) {
-    const text = link.innerText.trim().toLowerCase();
+async function getMyUsername() {
+  // Strategy 0: Check saved username in storage
+  try {
+    const { savedUsername, config: storedCfg, settings: storedSettings } = await chrome.storage.local.get(['savedUsername', 'config', 'settings']);
+    const preconfigured = savedUsername || storedCfg?.myUsername || storedSettings?.myUsername;
+    if (preconfigured && !SYSTEM_PATHS.has(preconfigured.toLowerCase())) {
+      return preconfigured.trim().replace(/^@/, '');
+    }
+  } catch (e) {}
+
+  // Strategy 1: Check current URL if already on own profile (e.g. instagram.com/my_name/)
+  const currentPathMatch = window.location.pathname.match(/^\/([a-zA-Z0-9._]+)\/?$/);
+  if (currentPathMatch && !SYSTEM_PATHS.has(currentPathMatch[1].toLowerCase())) {
+    const user = currentPathMatch[1];
+    chrome.storage.local.set({ savedUsername: user }).catch(() => {});
+    return user;
+  }
+
+  // Strategy 2: Look at navigation links (handles both expanded and collapsed icon-only sidebar)
+  const navLinks = Array.from(document.querySelectorAll('a[role="link"][href^="/"], nav a[href^="/"], div[role="navigation"] a[href^="/"], a[href^="/"]'));
+  for (const link of navLinks) {
     const href = link.getAttribute('href') || '';
-    if (text === 'profile' || link.querySelector('svg[aria-label="Profile"]') || link.querySelector('img[data-testid="user-avatar"]')) {
-      const parts = href.replace(/^\/|\/$/g, '').split('/');
-      if (parts[0] && !SYSTEM_PATHS.has(parts[0])) {
-        return parts[0];
+    const parts = href.replace(/^\/|\/$/g, '').split('/');
+    const user = parts[0];
+    if (user && !SYSTEM_PATHS.has(user.toLowerCase()) && /^[a-zA-Z0-9._]+$/.test(user)) {
+      // Check if this link contains an avatar img, profile icon, or text
+      const hasImg = !!link.querySelector('img');
+      const hasProfileSvg = !!link.querySelector('svg[aria-label="Profile"]');
+      const text = link.innerText.trim().toLowerCase();
+      if (hasImg || hasProfileSvg || text === 'profile' || text.includes('profile')) {
+        chrome.storage.local.set({ savedUsername: user }).catch(() => {});
+        return user;
       }
     }
   }
 
-  // Strategy 2: Check current URL if already on own profile
-  const match = window.location.pathname.match(/^\/([a-zA-Z0-9._]+)\/?/);
-  if (match && !SYSTEM_PATHS.has(match[1])) {
-    return match[1];
+  // Strategy 3: Check any avatar images with profile picture alt in the page
+  const avatarImgs = Array.from(document.querySelectorAll('img[alt*="profile picture" i], img[alt*="profile" i], img[draggable="false"]'));
+  for (const img of avatarImgs) {
+    const parentLink = img.closest('a[href^="/"]');
+    if (parentLink) {
+      const href = parentLink.getAttribute('href') || '';
+      const user = href.replace(/^\/|\/$/g, '').split('/')[0];
+      if (user && !SYSTEM_PATHS.has(user.toLowerCase()) && /^[a-zA-Z0-9._]+$/.test(user)) {
+        chrome.storage.local.set({ savedUsername: user }).catch(() => {});
+        return user;
+      }
+    }
   }
+
+  // Strategy 4: Search embedded JSON script tags for viewer / current user
+  try {
+    const scripts = document.querySelectorAll('script');
+    for (const s of scripts) {
+      const text = s.textContent || '';
+      const match = text.match(/"viewer"\s*:\s*\{[^}]*"username"\s*:\s*"([a-zA-Z0-9._]+)"/i) ||
+                    text.match(/"raw_username"\s*:\s*"([a-zA-Z0-9._]+)"/i) ||
+                    text.match(/"current_user"\s*:\s*\{[^}]*"username"\s*:\s*"([a-zA-Z0-9._]+)"/i);
+      if (match && match[1] && !SYSTEM_PATHS.has(match[1].toLowerCase())) {
+        const user = match[1];
+        chrome.storage.local.set({ savedUsername: user }).catch(() => {});
+        return user;
+      }
+    }
+  } catch (e) {}
 
   return null;
 }
@@ -589,11 +635,20 @@ async function startCleaningProcess() {
     logMessage('info', `Loaded ${scannedSet.size} previously scanned user(s) from local history.`);
 
     // 2. Identify current user
-    let myUsername = getMyUsername();
+    let myUsername = await getMyUsername();
     if (!myUsername) {
-      logMessage('error', 'Could not detect your username. Please make sure you are logged into Instagram.');
+      // Prompt user as a fallback so they are never stuck
+      const manual = window.prompt('IG Cleaner: Please enter your Instagram username (e.g. your_handle):');
+      if (manual && manual.trim()) {
+        myUsername = manual.trim().replace(/^@/, '');
+        await chrome.storage.local.set({ savedUsername: myUsername });
+      }
+    }
+
+    if (!myUsername) {
+      logMessage('error', 'Could not detect your username. Please click your profile avatar at the bottom-left of Instagram, then click Start Cleaner.');
       isRunning = false;
-      await broadcastState({ isRunning: false, statusText: 'Login required' });
+      await broadcastState({ isRunning: false, statusText: 'Username needed' });
       return;
     }
 
