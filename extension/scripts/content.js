@@ -16,7 +16,9 @@ let config = {
   inactiveDaysThreshold: 60,
   keepUsersWithPostsOver: 10,
   maxFollowersToScan: 150,
-  maxRemovalsPerRun: 150,
+  scanUnlimited: false,
+  maxRemovalsPerRun: 180, // Default 180 removals quota
+  removalsUnlimited: false,
   removalMode: 'DIFF_OR_INACTIVE', // DIFF_OR_INACTIVE, DIFF_ONLY, INACTIVE_ONLY, DIFF_AND_INACTIVE
   liveRemoveInLoop: true,
   dryRun: false,
@@ -420,7 +422,11 @@ async function collectFollowers(myUsername, scannedSet) {
   let unchangedCount = 0;
   const maxUnchanged = 6;
 
-  logMessage('info', 'Scrolling Followers dialog to collect unscanned accounts...');
+  if (config.scanUnlimited) {
+    logMessage('info', 'Unlimited Scan enabled: Scrolling Followers dialog to collect all unscanned accounts...');
+  } else {
+    logMessage('info', `Scrolling Followers dialog to collect up to ${config.maxFollowersToScan || 150} unscanned accounts...`);
+  }
 
   while (!shouldStop) {
     while (isPaused && !shouldStop) {
@@ -452,14 +458,15 @@ async function collectFollowers(myUsername, scannedSet) {
 
     const currentUnscanned = unscannedFollowers.size;
     const currentSeen = allSeenUsernames.size;
+    const targetDisplay = config.scanUnlimited ? '∞' : (config.maxFollowersToScan || '∞');
 
     broadcastState({
-      statusText: `Collecting: ${currentSeen} seen, ${currentUnscanned} new`,
+      statusText: `Collecting: ${currentSeen} seen, ${currentUnscanned}/${targetDisplay} new`,
       scannedCount: currentUnscanned
     });
 
-    if (config.maxFollowersToScan && currentUnscanned >= config.maxFollowersToScan) {
-      logMessage('info', `Reached limit of ${config.maxFollowersToScan} unscanned followers.`);
+    if (!config.scanUnlimited && config.maxFollowersToScan && currentUnscanned >= config.maxFollowersToScan) {
+      logMessage('info', `Reached target limit of ${config.maxFollowersToScan} unscanned followers.`);
       break;
     }
 
@@ -499,7 +506,7 @@ async function collectFollowers(myUsername, scannedSet) {
   await sleep(1000);
 
   let result = Array.from(unscannedFollowers);
-  if (config.maxFollowersToScan) {
+  if (!config.scanUnlimited && config.maxFollowersToScan) {
     result = result.slice(0, config.maxFollowersToScan);
   }
 
@@ -660,7 +667,9 @@ async function startCleaningProcess() {
     if (!followers) return; // redirected or stopped
 
     const totalToScan = followers.length;
-    logMessage('info', `Collected ${totalToScan} new unscanned follower(s) to inspect.`);
+    const removalQuota = config.removalsUnlimited ? null : (config.maxRemovalsPerRun || 180);
+    const removalQuotaText = removalQuota ? `${removalQuota} accounts` : 'Unlimited (No cap)';
+    logMessage('info', `Collected ${totalToScan} new unscanned follower(s) to inspect. [Removal Limit: ${removalQuotaText}]`);
 
     if (totalToScan === 0) {
       logMessage('success', 'No new unscanned followers found. Your followers list is clean!');
@@ -673,6 +682,7 @@ async function startCleaningProcess() {
     let removedCount = 0;
     let candidateCount = 0;
     let protectedCount = 0;
+    let reachedRemovalLimit = false;
 
     for (let idx = 0; idx < followers.length; idx++) {
       if (shouldStop) {
@@ -771,12 +781,26 @@ async function startCleaningProcess() {
 
         // LIVE REMOVAL IN LOOP
         if (!config.dryRun && config.liveRemoveInLoop) {
-          logMessage('info', `Removing @${username} live...`);
+          // Check removal quota before executing removal
+          if (removalQuota && removedCount >= removalQuota) {
+            logMessage('success', `🎯 Target removal limit reached (${removalQuota} removed). Halting further removals to protect your Instagram account.`);
+            reachedRemovalLimit = true;
+            break;
+          }
+
+          logMessage('info', `[Removal ${removedCount + 1}/${removalQuota || '∞'}] Removing @${username} live...`);
           const success = await removeFollowerLive(myUsername, username);
           if (success) {
             removedCount++;
             record.status = 'removed';
             await broadcastState({ removedCount, candidatesCount: candidateCount, protectedCount });
+
+            // Check removal quota immediately after removal
+            if (removalQuota && removedCount >= removalQuota) {
+              logMessage('success', `🎯 Reached target removal limit of ${removalQuota} followers! Run safely finished.`);
+              reachedRemovalLimit = true;
+              break;
+            }
           }
 
           // Delay between removals
@@ -803,13 +827,19 @@ async function startCleaningProcess() {
       });
     }
 
-    logMessage('success', `Completed scan of ${totalToScan} followers! Removed: ${removedCount}, Candidates: ${candidateCount}, Protected: ${protectedCount}`);
+    let finalCompletionStatus = 'Completed';
+    if (reachedRemovalLimit) {
+      finalCompletionStatus = `Completed (${removedCount}/${removalQuota} removed)`;
+      logMessage('success', `Session complete! Hit removal quota of ${removedCount} accounts. Scanned: ${followers.length}, Candidates: ${candidateCount}, Protected: ${protectedCount}`);
+    } else {
+      logMessage('success', `Completed scan of ${totalToScan} followers! Removed: ${removedCount}, Candidates: ${candidateCount}, Protected: ${protectedCount}`);
+    }
   } catch (err) {
     logMessage('error', `Process error: ${err.message}`);
   } finally {
     isRunning = false;
     isPaused = false;
-    await broadcastState({ isRunning: false, isPaused: false, statusText: 'Completed' });
+    await broadcastState({ isRunning: false, isPaused: false, statusText: finalCompletionStatus || 'Completed' });
   }
 }
 

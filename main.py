@@ -58,11 +58,11 @@ HEADLESS = os.getenv("HEADLESS", "False").lower() in ("true", "1", "yes")
 DRY_RUN = os.getenv("DRY_RUN", "False").lower() in ("true", "1", "yes")
 LIVE_REMOVE_IN_LOOP = os.getenv("LIVE_REMOVE_IN_LOOP", "True").lower() in ("true", "1", "yes")
 AUTO_CONFIRM_REMOVAL = os.getenv("AUTO_CONFIRM_REMOVAL", "True").lower() in ("true", "1", "yes")
-MAX_REMOVALS_PER_RUN = int(os.getenv("MAX_REMOVALS_PER_RUN", "150"))
+MAX_REMOVALS_PER_RUN = int(os.getenv("MAX_REMOVALS_PER_RUN", "180"))
 
-# Limit how many followers to scan from the top of the list (e.g. 25, 50, 100, 150)
+# Limit how many followers to scan from the top of the list (e.g. 50, 100, 150, or None / 'none' for unlimited)
 _max_scan_env = os.getenv("MAX_FOLLOWERS_TO_SCAN", "150")
-MAX_FOLLOWERS_TO_SCAN = int(_max_scan_env) if _max_scan_env and _max_scan_env.lower() != "none" else None
+MAX_FOLLOWERS_TO_SCAN = int(_max_scan_env) if _max_scan_env and _max_scan_env.lower() not in ("none", "unlimited", "0") else None
 
 # CSV Export Configuration
 EXPORT_CSV = True  # Automatically save scan results to CSV files
