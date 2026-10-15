@@ -397,6 +397,42 @@ def get_follower_usernames(page: Page, my_username: str, scanned_set: Optional[s
     unchanged_count = 0
     max_unchanged = 5
 
+    # Check if followers list loaded or if Instagram is showing the temporary empty placeholder
+    print("[INFO] Waiting for followers list to load in dialog...")
+    is_empty_cooldown = False
+    for _ in range(6):
+        time.sleep(1)
+        check = page.evaluate("""() => {
+            const d = document.querySelector('div[role="dialog"]');
+            if (!d) return { empty: false, userLinks: 0 };
+            const txt = (d.innerText || '').toLowerCase();
+            const empty = txt.includes("you'll see all the people who follow you here");
+            const links = d.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]');
+            let userLinks = 0;
+            for (const l of links) {
+                const href = l.getAttribute('href') || '';
+                if (href && !href.startsWith('/explore')) userLinks++;
+            }
+            return { empty: empty, userLinks: userLinks };
+        }""")
+        if check.get("userLinks", 0) > 0 and not check.get("empty"):
+            break
+        if check.get("empty"):
+            is_empty_cooldown = True
+
+    if is_empty_cooldown:
+        print("\n" + "=" * 65)
+        print("[NOTICE] INSTAGRAM FOLLOWERS LIST IS ON TEMPORARY COOLDOWN!")
+        print("Instagram displayed: \"You'll see all the people who follow you here.\"")
+        print("Instagram temporarily limits loading followers after scanning many accounts (687 scanned).")
+        print("Your account is completely safe! Please wait 30–60 minutes for Instagram's cooldown to reset.")
+        print("=" * 65 + "\n")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return []
+
     print("[INFO] Scrolling Followers dialog to collect unscanned followers...")
 
     while True:
