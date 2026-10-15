@@ -461,18 +461,82 @@ async function collectFollowers(myUsername, scannedSet) {
 
     const prevSeenTotal = allSeenUsernames.size;
 
-    // Collect visible links in dialog
-    const userLinks = dialog.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]');
-    for (const link of userLinks) {
-      const href = link.getAttribute('href') || '';
-      const user = href.replace(/^\/|\/$/g, '').split('/')[0];
-
-      if (user && !SYSTEM_PATHS.has(user) && user.toLowerCase() !== myUsername.toLowerCase() && /^[a-zA-Z0-9._]+$/.test(user)) {
-        allSeenUsernames.add(user.toLowerCase());
-        if (config.skipPreviouslyScanned && scannedSet.has(user.toLowerCase())) {
-          continue;
+    // 1. Detect if "Suggested for you" / "Suggestions" section header exists in dialog
+    let suggestedEl = null;
+    const candidates = dialog.querySelectorAll('h1, h2, h3, h4, h5, h6, span, div');
+    for (const el of candidates) {
+      if (el.children.length > 2) continue;
+      const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+      if (
+        txt === 'suggested for you' ||
+        txt === 'suggestions for you' ||
+        txt === 'suggested' ||
+        txt === 'suggestions' ||
+        txt === 'আপনার জন্য প্রস্তাবিত' ||
+        txt.startsWith('suggested for you') ||
+        txt.startsWith('suggestions for you')
+      ) {
+        if (el.offsetParent !== null || el.clientHeight > 0) {
+          suggestedEl = el;
+          break;
         }
-        unscannedFollowers.add(user);
+      }
+    }
+
+    if (suggestedEl) {
+      logMessage('info', "Detected 'Suggested for you' section in dialog. Reached bottom of real followers list.");
+      break;
+    }
+
+    // 2. Extract genuine followers (rows with 'Remove' button)
+    const removeKeywords = ['remove', 'মুছুন', 'মুছে ফেলুন', 'সরান'];
+    const allButtons = Array.from(dialog.querySelectorAll('button, div[role="button"]'));
+    let foundAnyFromRemove = false;
+
+    for (const btn of allButtons) {
+      const btnText = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+      const isRemove = removeKeywords.some((kw) => btnText === kw || btnText.startsWith(kw));
+
+      if (isRemove) {
+        let row = btn.parentElement;
+        let foundUser = null;
+        let depth = 0;
+        while (row && row !== dialog && depth < 8) {
+          const links = Array.from(row.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]'));
+          for (const l of links) {
+            const href = l.getAttribute('href') || '';
+            const u = href.replace(/^\/|\/$/g, '').split('/')[0];
+            if (u && !SYSTEM_PATHS.has(u) && u.toLowerCase() !== myUsername.toLowerCase() && /^[a-zA-Z0-9._]+$/.test(u)) {
+              foundUser = u;
+              break;
+            }
+          }
+          if (foundUser) break;
+          row = row.parentElement;
+          depth++;
+        }
+        if (foundUser) {
+          foundAnyFromRemove = true;
+          allSeenUsernames.add(foundUser.toLowerCase());
+          if (!config.skipPreviouslyScanned || !scannedSet.has(foundUser.toLowerCase())) {
+            unscannedFollowers.add(foundUser);
+          }
+        }
+      }
+    }
+
+    // Fallback: If no remove buttons matched in current view, collect links strictly before suggestedEl
+    if (!foundAnyFromRemove) {
+      const userLinks = dialog.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]');
+      for (const link of userLinks) {
+        const href = link.getAttribute('href') || '';
+        const user = href.replace(/^\/|\/$/g, '').split('/')[0];
+        if (user && !SYSTEM_PATHS.has(user) && user.toLowerCase() !== myUsername.toLowerCase() && /^[a-zA-Z0-9._]+$/.test(user)) {
+          allSeenUsernames.add(user.toLowerCase());
+          if (!config.skipPreviouslyScanned || !scannedSet.has(user.toLowerCase())) {
+            unscannedFollowers.add(user);
+          }
+        }
       }
     }
 

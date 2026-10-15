@@ -405,29 +405,114 @@ def get_follower_usernames(page: Page, my_username: str, scanned_set: Optional[s
 
         prev_seen_total = len(all_seen_usernames)
 
-        # Collect visible follower user links in dialog
-        links = page.locator(SELECTORS["dialog_user_links"]).all()
-        for link in links:
-            try:
-                href = link.get_attribute("href")
-                if href:
-                    user = href.strip("/").split("/")[0]
+        # Collect visible real follower usernames inside the dialog and detect 'Suggested for you'
+        scan_res = page.evaluate("""
+            ([myUser, sysPaths]) => {
+                const dialog = document.querySelector('div[role="dialog"]');
+                if (!dialog) return { followers: [], reachedSuggested: false };
+
+                // 1. Detect if "Suggested for you" / "Suggestions" section header exists in dialog
+                let suggestedEl = null;
+                const candidates = dialog.querySelectorAll('h1, h2, h3, h4, h5, h6, span, div');
+                for (const el of candidates) {
+                    if (el.children.length > 2) continue;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
                     if (
-                        user
-                        and user not in SYSTEM_PATHS
-                        and user.lower() != my_username.lower()
-                        and re.match(r"^[a-zA-Z0-9._]+$", user)
-                    ):
-                        all_seen_usernames[user.lower()] = True
-                        if SKIP_PREVIOUSLY_SCANNED and scanned_set and user.lower() in scanned_set:
-                            continue
-                        unscanned_followers[user] = True
-            except Exception:
-                pass
+                        txt === 'suggested for you' ||
+                        txt === 'suggestions for you' ||
+                        txt === 'suggested' ||
+                        txt === 'suggestions' ||
+                        txt === 'আপনার জন্য প্রস্তাবিত' ||
+                        txt.startsWith('suggested for you') ||
+                        txt.startsWith('suggestions for you')
+                    ) {
+                        if (el.offsetParent !== null || el.clientHeight > 0) {
+                            suggestedEl = el;
+                            break;
+                        }
+                    }
+                }
+
+                const reachedSuggested = !!suggestedEl;
+
+                // 2. Extract genuine followers
+                // Every genuine follower row has a "Remove" button ('remove', 'মুছুন', 'মুছে ফেলুন', 'সরান')
+                const removeKeywords = ['remove', 'মুছুন', 'মুছে ফেলুন', 'সরান'];
+                const allButtons = Array.from(dialog.querySelectorAll('button, div[role="button"]'));
+                const followersFromRemove = [];
+
+                for (const btn of allButtons) {
+                    if (suggestedEl && (suggestedEl.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                        continue;
+                    }
+                    const btnText = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                    const isRemove = removeKeywords.some(kw => btnText === kw || btnText.startsWith(kw));
+
+                    if (isRemove) {
+                        let row = btn.parentElement;
+                        let foundUser = null;
+                        let depth = 0;
+                        while (row && row !== dialog && depth < 8) {
+                            const links = Array.from(row.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]'));
+                            for (const l of links) {
+                                const href = l.getAttribute('href') || '';
+                                const u = href.replace(/^\\/+|\\/+$/g, '').split('/')[0];
+                                if (u && !sysPaths.includes(u.toLowerCase()) && u.toLowerCase() !== myUser.toLowerCase() && /^[a-zA-Z0-9._]+$/.test(u)) {
+                                    foundUser = u;
+                                    break;
+                                }
+                            }
+                            if (foundUser) break;
+                            row = row.parentElement;
+                            depth++;
+                        }
+                        if (foundUser && !followersFromRemove.includes(foundUser)) {
+                            followersFromRemove.push(foundUser);
+                        }
+                    }
+                }
+
+                // Fallback: If no remove buttons matched (e.g. customized UI), collect links strictly before suggestedEl
+                let finalFollowers = followersFromRemove;
+                if (finalFollowers.length === 0) {
+                    const allLinks = Array.from(dialog.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]'));
+                    for (const l of allLinks) {
+                        if (suggestedEl && (suggestedEl.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                            continue;
+                        }
+                        const href = l.getAttribute('href') || '';
+                        const u = href.replace(/^\\/+|\\/+$/g, '').split('/')[0];
+                        if (u && !sysPaths.includes(u.toLowerCase()) && u.toLowerCase() !== myUser.toLowerCase() && /^[a-zA-Z0-9._]+$/.test(u)) {
+                            if (!finalFollowers.includes(u)) {
+                                finalFollowers.push(u);
+                            }
+                        }
+                    }
+                }
+
+                return {
+                    followers: finalFollowers,
+                    reachedSuggested: reachedSuggested
+                };
+            }
+        """, [my_username, list(SYSTEM_PATHS)])
+
+        new_followers = scan_res.get("followers", [])
+        reached_suggested = scan_res.get("reachedSuggested", False)
+
+        for user in new_followers:
+            all_seen_usernames[user.lower()] = True
+            if SKIP_PREVIOUSLY_SCANNED and scanned_set and user.lower() in scanned_set:
+                continue
+            unscanned_followers[user] = True
 
         unscanned_count = len(unscanned_followers)
         seen_count = len(all_seen_usernames)
         print(f"\r[INFO] Followers seen in list: {seen_count} | New unscanned to process: {unscanned_count}", end="", flush=True)
+
+        if reached_suggested:
+            print(f"\n[INFO] Detected Instagram's 'Suggested for you' section. All real followers have been loaded!")
+            break
 
         # Early exit if we reached the requested limit of new unscanned followers
         if MAX_FOLLOWERS_TO_SCAN and unscanned_count >= MAX_FOLLOWERS_TO_SCAN:
@@ -478,20 +563,8 @@ def get_follower_usernames(page: Page, my_username: str, scanned_set: Optional[s
         if new_seen_total == prev_seen_total:
             unchanged_count += 1
             if unchanged_count >= max_unchanged:
-                # Extra pause to verify slow network loading
-                time.sleep(2.0)
-                links = page.locator(SELECTORS["dialog_user_links"]).all()
-                for link in links:
-                    href = link.get_attribute("href")
-                    if href:
-                        user = href.strip("/").split("/")[0]
-                        if user and user not in SYSTEM_PATHS and user.lower() != my_username.lower():
-                            all_seen_usernames[user.lower()] = True
-                            if not (SKIP_PREVIOUSLY_SCANNED and scanned_set and user.lower() in scanned_set):
-                                unscanned_followers[user] = True
-                if len(all_seen_usernames) == prev_seen_total:
-                    print("\n[INFO] Reached bottom of Followers list.")
-                    break
+                print("\n[INFO] Reached bottom of Followers list.")
+                break
         else:
             unchanged_count = 0
 
@@ -648,6 +721,21 @@ def get_profile_data(page: Page, username: str) -> Optional[Dict[str, Any]]:
                 except Exception:
                     pass
 
+    # Check if visited account is actually following the user (protects against suggested accounts)
+    is_follower = True
+    try:
+        header_text_lower = page.locator("header").inner_text().lower()
+        buttons = page.locator('header button, header div[role="button"]').all()
+        btn_texts = [b.inner_text().strip().lower() for b in buttons if b.is_visible()]
+        has_plain_follow = any(t in ("follow", "অনুসরণ করুন") for t in btn_texts)
+        has_follow_back = any("follow back" in t or "অনুসরণ ফিরিয়ে দিন" in t for t in btn_texts)
+        has_follows_you = "follows you" in header_text_lower or "আপনাকে অনুসরণ করে" in header_text_lower
+
+        if has_plain_follow and not has_follow_back and not has_follows_you:
+            is_follower = False
+    except Exception:
+        pass
+
     return {
         "followers": followers_val,
         "following": following_val,
@@ -656,6 +744,7 @@ def get_profile_data(page: Page, username: str) -> Optional[Dict[str, Any]]:
         "is_inactive": is_inactive,
         "inactive_reason": inactive_reason,
         "last_post_days": last_post_days,
+        "is_follower": is_follower,
     }
 
 
@@ -962,6 +1051,20 @@ def main() -> None:
                     "is_inactive": "",
                     "last_post_days": "",
                     "reason": "could not read counts",
+                })
+            elif not data.get("is_follower", True):
+                # Account is an Instagram suggested account and does not follow the user
+                print(f"[{idx}/{total_followers}] {username} -> does not follow you (Instagram suggested account) -> skipped")
+                all_scanned_records.append({
+                    "username": username,
+                    "status": "skipped",
+                    "followers": data.get("followers", ""),
+                    "following": data.get("following", ""),
+                    "diff": "",
+                    "posts": data.get("posts", ""),
+                    "is_inactive": "",
+                    "last_post_days": "",
+                    "reason": "does not follow you (suggested account)",
                 })
             else:
                 followers_cnt = data["followers"]
