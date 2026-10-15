@@ -252,6 +252,7 @@ async function fetchUserProfileData(username) {
 
         if (followers !== null && following !== null) {
           return {
+            userId: user.id || user.pk || null,
             followers,
             following,
             posts,
@@ -349,7 +350,11 @@ async function fetchUserProfileData(username) {
       }
     }
 
+    const idMatch = htmlText.match(/"user_id":"(\d+)"/) || htmlText.match(/"id":"(\d+)"/) || htmlText.match(/profilePage_([0-9]+)/);
+    const userId = idMatch ? idMatch[1] : null;
+
     return {
+      userId,
       followers,
       following,
       posts,
@@ -534,9 +539,11 @@ function isRemoveButton(btn) {
   // Ignore close buttons or search clear buttons
   if (btn.querySelector('svg[aria-label*="Close" i], svg[aria-label*="Clear" i], svg[aria-label*="বন্ধ" i]')) return false;
   const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-  if (label.includes('close') || label.includes('clear') || label.includes('বন্ধ')) return false;
+  if (label.includes('close') || label.includes('clear') || label.includes('বন্ধ') || label.includes('cancel') || label.includes('বাতিল')) return false;
 
   const rawText = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+  if (rawText.includes('cancel') || rawText.includes('বাতিল') || rawText === 'not now') return false;
+
   const patterns = [
     'remove',
     'মুছে',
@@ -552,6 +559,85 @@ function isRemoveButton(btn) {
   return patterns.some((p) => rawText.includes(p) || label.includes(p));
 }
 
+// Extract CSRF token from Instagram cookies or DOM
+function getCsrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  if (match) return decodeURIComponent(match[1]);
+  try {
+    const scripts = document.querySelectorAll('script');
+    for (const s of scripts) {
+      const txt = s.textContent || '';
+      const m = txt.match(/"csrf_token":"([^"]+)"/);
+      if (m) return m[1];
+    }
+  } catch (e) {}
+  return '';
+}
+
+// Helper: Query user ID by username if not available
+async function getUserIdByUsername(username) {
+  try {
+    const res = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
+      headers: {
+        'x-ig-app-id': '936619743392459',
+        'Accept': 'application/json'
+      },
+      credentials: 'include'
+    });
+    if (res.ok) {
+      const json = await res.json();
+      return json?.data?.user?.id || json?.data?.user?.pk || null;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Live remove follower via Instagram internal Web API (Prong 1: Fastest & 100% Reliable)
+async function removeFollowerApi(userId, targetUsername) {
+  if (!userId) {
+    userId = await getUserIdByUsername(targetUsername);
+  }
+  if (!userId) return false;
+
+  const csrfToken = getCsrfToken();
+  const headers = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'X-IG-App-ID': '936619743392459',
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-Instagram-AJAX': '1',
+    'Accept': '*/*'
+  };
+  if (csrfToken) {
+    headers['X-CSRFToken'] = csrfToken;
+  }
+
+  const endpoints = [
+    `https://www.instagram.com/api/v1/friendships/remove_follower/${userId}/`,
+    `https://www.instagram.com/web/friendships/${userId}/remove_follower/`
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: `user_id=${encodeURIComponent(userId)}`,
+        credentials: 'include'
+      });
+
+      if (response.ok) {
+        const json = await response.json().catch(() => null);
+        if (json && (json.status === 'ok' || json.did_remove === true)) {
+          logMessage('remove', `Removed @${targetUsername} live from followers.`);
+          return true;
+        }
+      }
+    } catch (e) {}
+  }
+
+  return false;
+}
+
 // Helper: Real synthetic text typing into search input
 async function typeIntoSearch(input, text) {
   input.focus();
@@ -559,41 +645,43 @@ async function typeIntoSearch(input, text) {
     input.scrollIntoView({ block: 'nearest' });
   } catch (e) {}
 
-  // 1. Click clear button inside the search field if present
+  // 1. Click clear button inside the search field if present (ONLY clear button, not svg search icon!)
   const parentWrap = input.closest('div') || input.parentElement;
   if (parentWrap) {
-    const clearBtn = parentWrap.querySelector('button, div[role="button"]:has(svg), [aria-label*="Clear" i], svg');
+    const clearBtn = parentWrap.querySelector('button[aria-label*="Clear" i], div[aria-label*="Clear" i], [role="button"][aria-label*="Clear" i]');
     if (clearBtn && clearBtn !== input) {
       try { clearBtn.click(); } catch (e) {}
-      await sleep(150);
+      await sleep(100);
     }
   }
 
-  // 2. Clear input using selectAll + delete
+  // 2. Clear input using selectAll + delete & native prototype
   try {
     input.select();
     document.execCommand('selectAll', false, null);
     document.execCommand('delete', false, null);
   } catch (e) {}
 
-  if (input._valueTracker) {
-    input._valueTracker.setValue('');
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  if (nativeSetter) {
+    nativeSetter.call(input, '');
+  } else {
+    input.value = '';
   }
-  input.value = '';
   input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
-  await sleep(150);
+  await sleep(100);
 
-  // 3. Type text using execCommand insertText (best for React/Relay synthetic events)
+  if (!text) return; // Cleared successfully
+
+  // 3. Set text using execCommand & native setter for React/Relay synthetic events
   let inserted = false;
   try {
     inserted = document.execCommand('insertText', false, text);
   } catch (e) {}
 
-  // 4. Fallback: native prototype setter
   if (!inserted || input.value !== text) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
     if (nativeSetter) {
       nativeSetter.call(input, text);
     } else {
@@ -601,7 +689,7 @@ async function typeIntoSearch(input, text) {
     }
   }
 
-  // 5. Fire full event chain so React 17/18/19 and Apollo/Relay queries trigger
+  // 4. Fire full event chain so React and search queries trigger
   input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
   input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
@@ -609,7 +697,7 @@ async function typeIntoSearch(input, text) {
   input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
 }
 
-// Live remove follower on Instagram
+// Live remove follower on Instagram UI (Prong 2: Resilient UI Fallback)
 async function removeFollowerLive(myUsername, targetUsername) {
   try {
     const dialog = await openFollowersDialog(myUsername);
@@ -635,22 +723,15 @@ async function removeFollowerLive(myUsername, targetUsername) {
 
     // Type the target username into search
     await typeIntoSearch(searchInput, targetUsername);
+    await sleep(1500); // Allow Instagram search debounce & rendering
 
-    // Wait and poll for the user's row and Remove button (up to 6.5s)
+    // Wait and poll for the user's row and Remove button (up to 7s)
     const lowerTarget = targetUsername.toLowerCase();
     let removeBtn = null;
     const searchWaitStart = Date.now();
 
-    while (Date.now() - searchWaitStart < 6500) {
+    while (Date.now() - searchWaitStart < 7000) {
       if (shouldStop) break;
-
-      // Check if "No results found"
-      const dialogText = (dialog.innerText || dialog.textContent || '').toLowerCase();
-      if (dialogText.includes('no results found') || dialogText.includes('কোনো ফলাফল পাওয়া যায়নি') || dialogText.includes('no followers found')) {
-        logMessage('warning', `@${targetUsername} is no longer in followers list (already removed or not found).`);
-        await typeIntoSearch(searchInput, '');
-        return false;
-      }
 
       const allButtons = Array.from(dialog.querySelectorAll('button, div[role="button"]'));
 
@@ -660,7 +741,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
 
         let parent = btn.parentElement;
         for (let i = 0; i < 9 && parent && parent !== dialog; i++) {
-          const rowText = (parent.innerText || parent.textContent || '').toLowerCase();
+          const rowText = (parent.innerText || '').toLowerCase();
           const hasUserLink = !!parent.querySelector(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`);
           if (hasUserLink || rowText.includes(lowerTarget)) {
             removeBtn = btn;
@@ -671,7 +752,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
         if (removeBtn) break;
       }
 
-      // Strategy 2: In filtered search results, any action button in the list is our target
+      // Strategy 2: If only 1 action button exists in dialog outside header, that's our target in filtered search results
       if (!removeBtn) {
         const resultButtons = allButtons.filter((b) => {
           if (!isRemoveButton(b)) return false;
@@ -684,7 +765,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
         } else if (resultButtons.length > 1) {
           for (const btn of resultButtons) {
             const container = btn.closest('div[role="listitem"], li') || btn.parentElement?.parentElement;
-            if (container && (container.innerText || container.textContent || '').toLowerCase().includes(lowerTarget)) {
+            if (container && (container.innerText || '').toLowerCase().includes(lowerTarget)) {
               removeBtn = btn;
               break;
             }
@@ -693,7 +774,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
         }
       }
 
-      // Strategy 3: Directly match row with user link and pick any button in that row
+      // Strategy 3: Find user's link directly and search for button in that row
       if (!removeBtn) {
         const userLinks = Array.from(dialog.querySelectorAll(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`));
         for (const link of userLinks) {
@@ -702,7 +783,7 @@ async function removeFollowerLive(myUsername, targetUsername) {
             let parent = link.parentElement;
             for (let i = 0; i < 9 && parent && parent !== dialog; i++) {
               const rowBtn = Array.from(parent.querySelectorAll('button, div[role="button"]')).find(
-                (b) => !b.querySelector('svg[aria-label*="Close" i]') && (b.innerText || b.textContent || '').trim().length > 0
+                (b) => isRemoveButton(b) || (!b.querySelector('svg[aria-label*="Close" i]') && (b.innerText || '').trim().length > 0)
               );
               if (rowBtn) {
                 removeBtn = rowBtn;
@@ -720,7 +801,12 @@ async function removeFollowerLive(myUsername, targetUsername) {
     }
 
     if (!removeBtn) {
-      logMessage('warning', `Remove button not found for @${targetUsername}.`);
+      const visibleText = (dialog.innerText || '').toLowerCase();
+      if (visibleText.includes('no results found') || visibleText.includes('কোনো ফলাফল পাওয়া যায়নি') || visibleText.includes('no followers found')) {
+        logMessage('warning', `@${targetUsername} is no longer in followers list (already removed or not found).`);
+      } else {
+        logMessage('warning', `Remove button not found for @${targetUsername}.`);
+      }
       await typeIntoSearch(searchInput, '');
       return false;
     }
@@ -737,19 +823,20 @@ async function removeFollowerLive(myUsername, targetUsername) {
       if (shouldStop) break;
 
       const dialogs = document.querySelectorAll('div[role="dialog"]');
-      for (let i = dialogs.length - 1; i >= 0; i--) {
-        const d = dialogs[i];
+      if (dialogs.length > 1) {
+        // Confirmation modal is always the topmost/newest dialog
+        const d = dialogs[dialogs.length - 1];
         const confirmBtns = Array.from(d.querySelectorAll('button, div[role="button"]'));
         const confirmBtn = confirmBtns.find((el) => {
-          if (!isRemoveButton(el)) return false;
           const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-          return !txt.includes('cancel') && !txt.includes('বাতিল') && txt !== 'not now';
+          if (txt.includes('cancel') || txt.includes('বাতিল') || txt === 'not now') return false;
+          return isRemoveButton(el) || confirmBtns.length === 2;
         });
 
         if (confirmBtn) {
           confirmBtn.click();
           confirmed = true;
-          await sleep(2500); // Wait for Instagram backend deletion request
+          await sleep(2200); // Wait for Instagram backend deletion request
           logMessage('remove', `Removed @${targetUsername} live from followers.`);
           break;
         }
@@ -797,9 +884,30 @@ async function startCleaningProcess() {
     const savedConfig = storageData.config || storageData.settings;
     if (savedConfig) config = { ...config, ...savedConfig };
 
+    // Ensure numeric properties are strictly typed
+    config.minDiff = Number(config.minDiff) || 300;
+    config.inactiveDaysThreshold = Number(config.inactiveDaysThreshold) || 60;
+    if (config.keepUsersWithPostsOver !== null && config.keepUsersWithPostsOver !== undefined && config.keepUsersWithPostsOver !== 'none') {
+      config.keepUsersWithPostsOver = Number(config.keepUsersWithPostsOver);
+    }
+    if (config.maxRemovalsPerRun) {
+      config.maxRemovalsPerRun = Number(config.maxRemovalsPerRun);
+    }
+    if (config.maxFollowersToScan) {
+      config.maxFollowersToScan = Number(config.maxFollowersToScan);
+    }
+
     const scannedSet = new Set(storageData.scannedUsers || []);
     const allRecords = storageData.allScannedRecords || [];
     const candidates = storageData.removalCandidates || [];
+
+    // Ensure any candidates that were not successfully removed in prior runs are re-scanned and processed
+    for (const c of candidates) {
+      if (c && c.status !== 'removed' && c.username) {
+        scannedSet.delete(c.username.toLowerCase());
+      }
+    }
+    await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
 
     logMessage('info', `Loaded ${scannedSet.size} previously scanned user(s) from local history.`);
 
@@ -871,12 +979,6 @@ async function startCleaningProcess() {
 
       const data = await fetchUserProfileData(username);
 
-      // Save user to history set immediately
-      if (config.skipPreviouslyScanned) {
-        scannedSet.add(username.toLowerCase());
-        await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
-      }
-
       if (!data || data.followers === null || data.following === null) {
         logMessage('warning', `@${username} -> could not read counts -> skipped`);
         allRecords.push({
@@ -910,6 +1012,7 @@ async function startCleaningProcess() {
         isCandidate = false;
         protectedByPosts = true;
         protectedCount++;
+        await broadcastState({ protectedCount });
       }
 
       const reasons = [];
@@ -940,6 +1043,7 @@ async function startCleaningProcess() {
         candidateCount++;
         candidates.push(record);
         logMessage('candidate', `@${username} -> candidate (${reasonDesc})`, record);
+        await broadcastState({ candidatesCount: candidateCount });
 
         // LIVE REMOVAL IN LOOP
         if (!config.dryRun && config.liveRemoveInLoop) {
@@ -951,10 +1055,23 @@ async function startCleaningProcess() {
           }
 
           logMessage('info', `[Removal ${removedCount + 1}/${removalQuota || '∞'}] Removing @${username} live...`);
-          const success = await removeFollowerLive(myUsername, username);
+
+          // Attempt removal via internal API first (Fastest & 100% reliable), fallback to UI
+          let success = false;
+          if (data.userId) {
+            success = await removeFollowerApi(data.userId, username);
+          }
+          if (!success) {
+            success = await removeFollowerLive(myUsername, username);
+          }
+
           if (success) {
             removedCount++;
             record.status = 'removed';
+            if (config.skipPreviouslyScanned) {
+              scannedSet.add(username.toLowerCase());
+              await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
+            }
             await broadcastState({ removedCount, candidatesCount: candidateCount, protectedCount });
 
             // Check removal quota immediately after removal
@@ -963,15 +1080,26 @@ async function startCleaningProcess() {
               reachedRemovalLimit = true;
               break;
             }
+          } else {
+            record.status = 'failed';
+            logMessage('warning', `Could not remove @${username}. Kept in queue for retry.`);
           }
 
           // Delay between removals
           await randomDelay(config.removalDelayMin, config.removalDelayMax);
         } else {
+          if (config.skipPreviouslyScanned) {
+            scannedSet.add(username.toLowerCase());
+            await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
+          }
           await randomDelay(config.visitDelayMin, config.visitDelayMax);
         }
       } else {
         logMessage('keep', `@${username} -> keep (${reasonDesc})`, record);
+        if (config.skipPreviouslyScanned) {
+          scannedSet.add(username.toLowerCase());
+          await chrome.storage.local.set({ scannedUsers: Array.from(scannedSet) });
+        }
         await randomDelay(config.visitDelayMin, config.visitDelayMax);
       }
 
