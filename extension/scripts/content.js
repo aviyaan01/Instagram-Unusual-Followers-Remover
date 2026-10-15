@@ -175,17 +175,27 @@ async function getMyUsername() {
   return null;
 }
 
+// Helper: Close a single dialog element cleanly
+function closeDialogElement(d) {
+  if (!d) return;
+  const closeBtn = d.querySelector(
+    'svg[aria-label*="Close" i], button[aria-label*="Close" i], div[role="button"][aria-label*="Close" i], ' +
+    'svg[aria-label*="বন্ধ" i], [aria-label*="বন্ধ" i], ' +
+    'header button, header div[role="button"], button:has(svg), div[role="button"]:has(svg)'
+  );
+  if (closeBtn) {
+    const clickable = closeBtn.closest('button, div[role="button"]') || closeBtn;
+    try { clickable.click(); return; } catch (e) {}
+  }
+}
+
 // Helper: Close Instagram dialogs cleanly
 function closeInstagramDialog() {
   const dialogs = document.querySelectorAll('div[role="dialog"]');
   for (const d of dialogs) {
-    const closeBtn = d.querySelector('svg[aria-label="Close"], button:has(svg[aria-label="Close"]), div[role="button"]:has(svg[aria-label="Close"])');
-    if (closeBtn) {
-      const clickable = closeBtn.closest('button, div[role="button"]') || closeBtn;
-      try { clickable.click(); } catch (e) {}
-    }
+    closeDialogElement(d);
   }
-  const escEvent = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true });
+  const escEvent = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true });
   document.dispatchEvent(escEvent);
   window.dispatchEvent(escEvent);
 }
@@ -366,9 +376,11 @@ function dismissPopups() {
 // Open Followers modal on current profile
 async function openFollowersDialog(myUsername) {
   // If dialog is ALREADY open and visible on screen, return it directly
-  const existingDialog = document.querySelector('div[role="dialog"]');
-  if (existingDialog && existingDialog.offsetParent !== null) {
-    return existingDialog;
+  const existingDialogs = document.querySelectorAll('div[role="dialog"]');
+  for (const d of existingDialogs) {
+    if (d.offsetParent !== null && d.querySelector('input, a[href*="/followers"], ul, div[role="listitem"]')) {
+      return d;
+    }
   }
 
   // Ensure we are on user profile page
@@ -390,11 +402,14 @@ async function openFollowersDialog(myUsername) {
 
   dismissPopups();
 
-  // Find followers button
+  // Find followers button (English: "followers", Bengali: "অনুসারী")
   let followersBtn = document.querySelector('a[href$="/followers/"], a[href*="/followers"]');
   if (!followersBtn) {
-    const allLinks = Array.from(document.querySelectorAll('a, span'));
-    followersBtn = allLinks.find((el) => el.innerText && el.innerText.toLowerCase().includes('followers'));
+    const allLinks = Array.from(document.querySelectorAll('a, span, div[role="button"]'));
+    followersBtn = allLinks.find((el) => {
+      const txt = (el.innerText || el.textContent || '').toLowerCase();
+      return txt.includes('follower') || txt.includes('অনুসারী');
+    });
   }
 
   if (!followersBtn) {
@@ -404,12 +419,12 @@ async function openFollowersDialog(myUsername) {
   followersBtn.click();
   await sleep(2500);
 
-  const dialog = document.querySelector('div[role="dialog"]');
-  if (!dialog) {
-    throw new Error('Followers dialog did not open.');
+  const dialogs = document.querySelectorAll('div[role="dialog"]');
+  if (dialogs.length > 0) {
+    return dialogs[0];
   }
 
-  return dialog;
+  throw new Error('Followers dialog did not open.');
 }
 
 // Collect unscanned followers from Followers dialog
@@ -513,48 +528,141 @@ async function collectFollowers(myUsername, scannedSet) {
   return result;
 }
 
+// Helper: Detect if an element is a Remove button across multiple languages
+function isRemoveButton(btn) {
+  if (!btn) return false;
+  // Ignore close buttons or search clear buttons
+  if (btn.querySelector('svg[aria-label*="Close" i], svg[aria-label*="Clear" i], svg[aria-label*="বন্ধ" i]')) return false;
+  const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+  if (label.includes('close') || label.includes('clear') || label.includes('বন্ধ')) return false;
+
+  const rawText = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+  const patterns = [
+    'remove',
+    'মুছে',
+    'রিমুভ',
+    'সরান',
+    'eliminar',
+    'supprimer',
+    'entfernen',
+    'हटाएं',
+    'remover'
+  ];
+
+  return patterns.some((p) => rawText.includes(p) || label.includes(p));
+}
+
+// Helper: Real synthetic text typing into search input
+async function typeIntoSearch(input, text) {
+  input.focus();
+  try {
+    input.scrollIntoView({ block: 'nearest' });
+  } catch (e) {}
+
+  // 1. Click clear button inside the search field if present
+  const parentWrap = input.closest('div') || input.parentElement;
+  if (parentWrap) {
+    const clearBtn = parentWrap.querySelector('button, div[role="button"]:has(svg), [aria-label*="Clear" i], svg');
+    if (clearBtn && clearBtn !== input) {
+      try { clearBtn.click(); } catch (e) {}
+      await sleep(150);
+    }
+  }
+
+  // 2. Clear input using selectAll + delete
+  try {
+    input.select();
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+  } catch (e) {}
+
+  if (input._valueTracker) {
+    input._valueTracker.setValue('');
+  }
+  input.value = '';
+  input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+  await sleep(150);
+
+  // 3. Type text using execCommand insertText (best for React/Relay synthetic events)
+  let inserted = false;
+  try {
+    inserted = document.execCommand('insertText', false, text);
+  } catch (e) {}
+
+  // 4. Fallback: native prototype setter
+  if (!inserted || input.value !== text) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (nativeSetter) {
+      nativeSetter.call(input, text);
+    } else {
+      input.value = text;
+    }
+  }
+
+  // 5. Fire full event chain so React 17/18/19 and Apollo/Relay queries trigger
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+  input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+}
+
 // Live remove follower on Instagram
 async function removeFollowerLive(myUsername, targetUsername) {
   try {
     const dialog = await openFollowersDialog(myUsername);
     if (!dialog) return false;
 
-    // Find search input
-    const searchInput = dialog.querySelector('input[placeholder*="Search" i], input[type="text"]');
+    // Scroll followers container to top
+    const scrollable = dialog.querySelector('div[style*="overflow"], div[class*="x1dm5hii"]')?.parentElement || dialog;
+    try { scrollable.scrollTop = 0; } catch (e) {}
+
+    // Find search input (with polling up to 3.5 seconds)
+    let searchInput = null;
+    const findSearchStart = Date.now();
+    while (Date.now() - findSearchStart < 3500) {
+      searchInput = dialog.querySelector('input[placeholder*="Search" i], input[type="text"], input[aria-label*="Search" i], input[placeholder*="অনুসন্ধান" i]');
+      if (searchInput) break;
+      await sleep(250);
+    }
+
     if (!searchInput) {
       logMessage('error', 'Search input not found in Followers dialog.');
       return false;
     }
 
-    // Focus & type username with input event
-    searchInput.focus();
-    searchInput.value = '';
-    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await sleep(200);
+    // Type the target username into search
+    await typeIntoSearch(searchInput, targetUsername);
 
-    // Set value and trigger synthetic React input
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    nativeInputValueSetter.call(searchInput, targetUsername);
-    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-    searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-    await sleep(2500);
-
-    // Safe targeting: locate the SPECIFIC row matching targetUsername
+    // Wait and poll for the user's row and Remove button (up to 6.5s)
     const lowerTarget = targetUsername.toLowerCase();
     let removeBtn = null;
+    const searchWaitStart = Date.now();
 
-    // 1. Try finding row with link matching targetUsername
-    const userLinks = Array.from(dialog.querySelectorAll(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`));
-    for (const link of userLinks) {
-      const hrefUser = (link.getAttribute('href') || '').replace(/^\/|\/$/g, '').split('/')[0].toLowerCase();
-      if (hrefUser === lowerTarget) {
-        let parent = link.parentElement;
-        for (let i = 0; i < 8 && parent && parent !== dialog; i++) {
-          const btn = Array.from(parent.querySelectorAll('div[role="button"], button')).find(
-            (b) => b.innerText && b.innerText.trim() === 'Remove'
-          );
-          if (btn) {
+    while (Date.now() - searchWaitStart < 6500) {
+      if (shouldStop) break;
+
+      // Check if "No results found"
+      const dialogText = (dialog.innerText || dialog.textContent || '').toLowerCase();
+      if (dialogText.includes('no results found') || dialogText.includes('কোনো ফলাফল পাওয়া যায়নি') || dialogText.includes('no followers found')) {
+        logMessage('warning', `@${targetUsername} is no longer in followers list (already removed or not found).`);
+        await typeIntoSearch(searchInput, '');
+        return false;
+      }
+
+      const allButtons = Array.from(dialog.querySelectorAll('button, div[role="button"]'));
+
+      // Strategy 1: Find Remove button inside row that explicitly matches targetUsername
+      for (const btn of allButtons) {
+        if (!isRemoveButton(btn)) continue;
+
+        let parent = btn.parentElement;
+        for (let i = 0; i < 9 && parent && parent !== dialog; i++) {
+          const rowText = (parent.innerText || parent.textContent || '').toLowerCase();
+          const hasUserLink = !!parent.querySelector(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`);
+          if (hasUserLink || rowText.includes(lowerTarget)) {
             removeBtn = btn;
             break;
           }
@@ -562,59 +670,113 @@ async function removeFollowerLive(myUsername, targetUsername) {
         }
         if (removeBtn) break;
       }
-    }
 
-    // 2. Fallback: row container containing the exact username text
-    if (!removeBtn) {
-      const allDivs = Array.from(dialog.querySelectorAll('div[role="listitem"], ul > li, div > div'));
-      for (const el of allDivs) {
-        const text = el.innerText || '';
-        if (text.toLowerCase().includes(lowerTarget)) {
-          const btn = Array.from(el.querySelectorAll('div[role="button"], button')).find(
-            (b) => b.innerText && b.innerText.trim() === 'Remove'
-          );
-          if (btn) {
-            removeBtn = btn;
-            break;
+      // Strategy 2: In filtered search results, any action button in the list is our target
+      if (!removeBtn) {
+        const resultButtons = allButtons.filter((b) => {
+          if (!isRemoveButton(b)) return false;
+          return !b.closest('header, [role="banner"]');
+        });
+
+        if (resultButtons.length === 1) {
+          removeBtn = resultButtons[0];
+          break;
+        } else if (resultButtons.length > 1) {
+          for (const btn of resultButtons) {
+            const container = btn.closest('div[role="listitem"], li') || btn.parentElement?.parentElement;
+            if (container && (container.innerText || container.textContent || '').toLowerCase().includes(lowerTarget)) {
+              removeBtn = btn;
+              break;
+            }
+          }
+          if (removeBtn) break;
+        }
+      }
+
+      // Strategy 3: Directly match row with user link and pick any button in that row
+      if (!removeBtn) {
+        const userLinks = Array.from(dialog.querySelectorAll(`a[href*="/${targetUsername}/" i], a[href*="/${targetUsername}" i]`));
+        for (const link of userLinks) {
+          const hrefUser = (link.getAttribute('href') || '').replace(/^\/|\/$/g, '').split('/')[0].toLowerCase();
+          if (hrefUser === lowerTarget) {
+            let parent = link.parentElement;
+            for (let i = 0; i < 9 && parent && parent !== dialog; i++) {
+              const rowBtn = Array.from(parent.querySelectorAll('button, div[role="button"]')).find(
+                (b) => !b.querySelector('svg[aria-label*="Close" i]') && (b.innerText || b.textContent || '').trim().length > 0
+              );
+              if (rowBtn) {
+                removeBtn = rowBtn;
+                break;
+              }
+              parent = parent.parentElement;
+            }
+            if (removeBtn) break;
           }
         }
       }
+
+      if (removeBtn) break;
+      await sleep(350);
     }
 
     if (!removeBtn) {
       logMessage('warning', `Remove button not found for @${targetUsername}.`);
-      closeInstagramDialog();
+      await typeIntoSearch(searchInput, '');
       return false;
     }
 
+    // Click the Remove button on the user's row
     removeBtn.click();
-    await sleep(1500);
+    await sleep(1000);
 
-    // Find confirmation modal (last dialog)
-    const dialogs = document.querySelectorAll('div[role="dialog"]');
-    const confirmDialog = dialogs[dialogs.length - 1];
+    // Wait & poll for Confirmation modal (up to 4.5s)
+    let confirmed = false;
+    const confirmStart = Date.now();
 
-    const confirmBtns = Array.from(confirmDialog.querySelectorAll('button, div[role="button"]'));
-    const confirmBtn = confirmBtns.find((el) => el.innerText && el.innerText.trim() === 'Remove');
+    while (Date.now() - confirmStart < 4500) {
+      if (shouldStop) break;
 
-    if (confirmBtn) {
-      confirmBtn.click();
-      await sleep(2500);
-      logMessage('remove', `Removed @${targetUsername} live from followers.`);
-    } else {
-      logMessage('warning', `Confirmation modal button not found for @${targetUsername}.`);
-      closeInstagramDialog();
-      return false;
+      const dialogs = document.querySelectorAll('div[role="dialog"]');
+      for (let i = dialogs.length - 1; i >= 0; i--) {
+        const d = dialogs[i];
+        const confirmBtns = Array.from(d.querySelectorAll('button, div[role="button"]'));
+        const confirmBtn = confirmBtns.find((el) => {
+          if (!isRemoveButton(el)) return false;
+          const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+          return !txt.includes('cancel') && !txt.includes('বাতিল') && txt !== 'not now';
+        });
+
+        if (confirmBtn) {
+          confirmBtn.click();
+          confirmed = true;
+          await sleep(2500); // Wait for Instagram backend deletion request
+          logMessage('remove', `Removed @${targetUsername} live from followers.`);
+          break;
+        }
+      }
+
+      if (confirmed) break;
+      await sleep(300);
     }
 
-    // Close any dialogs
-    closeInstagramDialog();
-    await sleep(500);
+    if (!confirmed) {
+      logMessage('warning', `Confirmation modal button not found for @${targetUsername}.`);
+    }
 
-    return true;
+    // Clear search input so next candidate search is completely clean
+    try {
+      await typeIntoSearch(searchInput, '');
+    } catch (e) {}
+
+    // Close any leftover confirmation modal
+    const dialogsAfter = document.querySelectorAll('div[role="dialog"]');
+    if (dialogsAfter.length > 1) {
+      closeDialogElement(dialogsAfter[dialogsAfter.length - 1]);
+    }
+
+    return confirmed;
   } catch (err) {
     logMessage('error', `Error removing @${targetUsername}: ${err.message}`);
-    closeInstagramDialog();
     return false;
   }
 }
